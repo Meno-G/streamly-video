@@ -1,0 +1,282 @@
+// Streamly data model.
+// Counters that are read on every card (views) are stored on the row; everything else
+// (likes, comments, subscribers) is counted from the relation tables.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Visibility {
+  PUBLIC
+  UNLISTED
+  PRIVATE
+}
+
+enum ReactionType {
+  LIKE
+  DISLIKE
+}
+
+enum NotificationType {
+  NEW_SUBSCRIBER
+  VIDEO_COMMENT
+  COMMENT_REPLY
+  VIDEO_LIKE
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  /// Lowercase handle used in /channel/[username].
+  username     String   @unique
+  /// Display and channel name.
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile           Profile?
+  videos            Video[]
+  comments          Comment[]
+  likes             Like[]
+  commentLikes      CommentLike[]
+  subscriptions     Subscription[] @relation("Subscriber")
+  subscribers       Subscription[] @relation("Channel")
+  playlists         Playlist[]
+  history           WatchHistory[]
+  savedVideos       SavedVideo[]
+  views             VideoView[]
+  notifications     Notification[] @relation("Recipient")
+  notificationsSent Notification[] @relation("Actor")
+}
+
+model Profile {
+  id        String  @id @default(cuid())
+  userId    String  @unique
+  avatarUrl String?
+  bannerUrl String?
+  bio       String  @default("")
+  location  String?
+  /// [{ "label": string, "url": string }]
+  links     Json    @default("[]")
+  verified  Boolean @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Category {
+  id     String  @id @default(cuid())
+  name   String  @unique
+  slug   String  @unique
+  videos Video[]
+}
+
+model Tag {
+  id     String     @id @default(cuid())
+  name   String     @unique
+  videos VideoTag[]
+}
+
+model Video {
+  id              String     @id @default(cuid())
+  title           String
+  description     String     @default("")
+  /// Public URL or storage key resolved by src/server/storage.
+  videoUrl        String
+  /// Storage key when the file is managed by our storage layer (null for external URLs).
+  videoKey        String?
+  thumbnailUrl    String?
+  thumbnailKey    String?
+  durationSeconds Int
+  isShort         Boolean    @default(false)
+  visibility      Visibility @default(PUBLIC)
+  views           Int        @default(0)
+  ownerId         String
+  categoryId      String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  category      Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  tags          VideoTag[]
+  likes         Like[]
+  comments      Comment[]
+  playlistItems PlaylistVideo[]
+  history       WatchHistory[]
+  savedBy       SavedVideo[]
+  viewEvents    VideoView[]
+  notifications Notification[]
+
+  @@index([visibility, createdAt])
+  @@index([visibility, views])
+  @@index([ownerId, createdAt])
+  @@index([categoryId, visibility, createdAt])
+}
+
+model VideoTag {
+  videoId String
+  tagId   String
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  tag   Tag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([videoId, tagId])
+  @@index([tagId])
+}
+
+/// One reaction per user per video; switching like ↔ dislike updates the row.
+model Like {
+  id        String       @id @default(cuid())
+  userId    String
+  videoId   String
+  type      ReactionType
+  createdAt DateTime     @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId, type])
+  @@index([userId, type, createdAt])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  content   String
+  videoId   String
+  authorId  String
+  /// Set for replies. Replies are one level deep.
+  parentId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  video         Video          @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  author        User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent        Comment?       @relation("Replies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies       Comment[]      @relation("Replies")
+  likes         CommentLike[]
+  notifications Notification[]
+
+  @@index([videoId, parentId, createdAt])
+  @@index([parentId, createdAt])
+}
+
+model CommentLike {
+  userId    String
+  commentId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@id([userId, commentId])
+  @@index([commentId])
+}
+
+model Subscription {
+  subscriberId String
+  channelId    String
+  createdAt    DateTime @default(now())
+
+  subscriber User @relation("Subscriber", fields: [subscriberId], references: [id], onDelete: Cascade)
+  channel    User @relation("Channel", fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([subscriberId, channelId])
+  @@index([channelId, createdAt])
+}
+
+model Playlist {
+  id           String     @id @default(cuid())
+  name         String
+  description  String     @default("")
+  visibility   Visibility @default(PUBLIC)
+  /// Custom cover; falls back to the first video's thumbnail.
+  thumbnailUrl String?
+  ownerId      String
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  owner User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items PlaylistVideo[]
+
+  @@index([ownerId, updatedAt])
+}
+
+model PlaylistVideo {
+  playlistId String
+  videoId    String
+  position   Int
+  addedAt    DateTime @default(now())
+
+  playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  video    Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([playlistId, videoId])
+  @@index([playlistId, position])
+  @@index([videoId])
+}
+
+/// Latest watch of a video per user (the /history page).
+model WatchHistory {
+  id              String   @id @default(cuid())
+  userId          String
+  videoId         String
+  progressSeconds Int      @default(0)
+  watchedAt       DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([userId, watchedAt])
+}
+
+/// Watch later.
+model SavedVideo {
+  userId    String
+  videoId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([userId, videoId])
+  @@index([userId, createdAt])
+}
+
+/// One row per counted view; powers studio analytics (views and watch time over time).
+model VideoView {
+  id           String   @id @default(cuid())
+  videoId      String
+  userId       String?
+  watchSeconds Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([videoId, createdAt])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  type        NotificationType
+  recipientId String
+  actorId     String
+  videoId     String?
+  commentId   String?
+  read        Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  recipient User     @relation("Recipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor     User     @relation("Actor", fields: [actorId], references: [id], onDelete: Cascade)
+  video     Video?   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  comment   Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, read, createdAt])
+}
